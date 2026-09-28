@@ -1,56 +1,82 @@
-# Support Agent with Memory
+# SupportMemory
 
-A customer support agent that remembers every customer across contacts —
-past orders, past tickets, and stated preferences — instead of starting
-from zero on every conversation.
+A customer support agent that remembers every customer across contacts, using [Hindsight](https://github.com/vectorize-io/hindsight) as its persistent memory layer.
 
-## The problem
+A stateless support bot asks every customer to explain their problem from scratch. SupportMemory recalls the customer's orders, past tickets, and preferences before it answers, so a vague message like *"Hi, I have an issue with my order"* is enough for it to name the right orders and reference the previous issue.
 
-Generic support agents (and most support reps working off a ticket queue)
-treat every conversation as the first one. Customers repeat themselves,
-agents re-ask the same clarifying questions, and preferences learned in
-one ticket vanish by the next.
+## Before and after
 
-## How memory is used
+Same customer, same LLM, same message. The only difference is memory.
 
-This agent uses [Hindsight](https://github.com/vectorize-io/hindsight) as
-its memory layer, with **one memory bank per customer**:
+| Without memory | With Hindsight memory |
+|---|---|
+| Asks for the order number, the item, a description, and the order date. | Names both orders on file (#ORD-88213 and #ORD-91765), mentions the cracked jar reported in August, and asks which order the issue is about. |
 
-- **Retain** — after every exchange, the conversation is written back into
-  that customer's memory bank, so it accumulates over time (see
-  `agent.py::respond`).
-- **Recall** — before generating a reply, the agent queries Hindsight for
-  memories relevant to the customer's current message (past orders,
-  tickets, and preferences) and injects them into the prompt.
-- Because memory is scoped per customer, the agent can hold context for
-  *any number* of customers simultaneously without them bleeding into
-  each other.
+The demo UI shows both answers side by side, with the memories Hindsight recalled and the new experience it retained.
 
-The result: on a customer's first-ever contact the agent behaves like any
-generic support bot. On their second contact — even days later — it already
-knows their order number, what went wrong last time, and how they like to
-be helped.
+<!-- Add screenshots here: docs/before-after.png -->
+
+## How Hindsight memory is used
+
+Every customer message goes through one loop in `agent.py`:
+
+1. **Recall.** The agent asks Hindsight for context relevant to this customer and this message (past orders, past issues, preferences).
+2. **Apply policy.** Company support policy is kept separate from memory. Memory says what happened; policy says what the agent may promise.
+3. **Generate.** The LLM (Groq, `openai/gpt-oss-120b`) answers using the recalled context.
+4. **Retain.** A short factual summary of what the customer reported is written back to Hindsight.
+
+Each customer has their own memory bank (`support-<version>-<customer_id>`), so one customer's history can never leak into another's conversation.
+
+### Design decision: memory is not authorization
+
+An early version retained the full exchange, including the agent's own reply. That is risky: if the agent ever said "I'll open a replacement request", that sentence would be stored and later recalled as if it were fact.
+
+Two changes fixed this:
+
+- **Retain only what the customer reported**, plus a note that no replacement, refund, shipping, or compensation should be treated as confirmed unless separately verified. The agent's own words are never stored.
+- **Keep support policy separate from memory.** The system prompt lists what the agent may do (acknowledge, ask for a photo or address, explain the next step) and what it must not promise without a verified record.
 
 ## Project structure
 
 ```
-data/customers.py    # synthetic customer backstories (orders, past tickets)
-seed_memory.py        # one-time script: retains each customer's backstory
-agent.py               # the retain/recall loop + Groq LLM call
-app.py                  # Streamlit chat UI for the live demo
+agent.py           recall -> policy -> generate -> retain loop
+app.py             Streamlit demo UI with a before/after comparison
+seed_memory.py     seeds each demo customer's Hindsight memory bank
+data/customers.py  sample customers with order and ticket history
 ```
 
-## Running it
+## Run it
 
-1. Copy `.env.example` to `.env` and fill in your Hindsight and Groq API keys.
-2. `pip install -r requirements.txt`
-3. `python seed_memory.py` — seeds each demo customer's memory bank.
-4. `streamlit run app.py` — opens the chat UI. Pick a customer from the
-   sidebar and start chatting.
+1. Create a Hindsight Cloud account and API key, and a Groq API key.
+2. Create a `.env` file in the project root:
 
-## The demo moment
+   ```
+   HINDSIGHT_API_KEY=your-hindsight-key
+   HINDSIGHT_BASE_URL=https://api.hindsight.vectorize.io
+   GROQ_API_KEY=your-groq-key
+   GROQ_MODEL=openai/gpt-oss-120b
+   ```
 
-Message the agent as a customer with something generic like *"Hi, I have an
-issue with my order"* — the agent will already reference their actual order
-number, prior ticket, and preference (e.g. replacement over refund) without
-you telling it anything. That's the memory working.
+3. Install and seed:
+
+   ```
+   python -m pip install -r requirements.txt
+   python seed_memory.py
+   ```
+
+4. Start the demo:
+
+   ```
+   python -m streamlit run app.py
+   ```
+
+5. Pick **Ananya Rao**, send *"Hi, I have an issue with my order"*, then *"It's about the mixer grinder, the jar arrived damaged again"*.
+
+To reset every customer to a clean memory bank, change `BANK_VERSION` in `seed_memory.py` (for example `v2` to `v3`) and run `python seed_memory.py` again.
+
+## Limitations
+
+- Customers, orders, and tickets are sample data written for the demo.
+- Support policy is a fixed block in the prompt. A production system would check real order and refund records before letting the agent promise anything.
+- Tested by hand on a small number of conversations, not benchmarked.
+- The Hindsight sync client is called from a short-lived worker thread per request to avoid event-loop conflicts with Streamlit.
