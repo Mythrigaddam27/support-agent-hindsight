@@ -22,12 +22,15 @@ client = Hindsight(
     api_key=os.environ["HINDSIGHT_API_KEY"],
 )
 
-# Bump this (v3, v4, ...) to start every customer from a clean memory bank.
-BANK_VERSION = "v2"
+# Bump this (v3, v4, ...) to start every customer from clean memory banks.
+BANK_VERSION = "v4"
 
 
 def bank_id_for(customer_id: str) -> str:
     """One bank per customer -- keeps memory scoped and recall fast."""
+    known_customer_ids = {customer["customer_id"] for customer in CUSTOMERS}
+    if customer_id not in known_customer_ids:
+        raise ValueError(f"Unknown customer ID: {customer_id}")
     return f"support-{BANK_VERSION}-{customer_id}"
 
 
